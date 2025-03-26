@@ -104,3 +104,79 @@ pub fn minmax_quant(comptime T: type, comptime U: type, scheme: quantScheme, inp
 
     quantize_tensor(T, U, input, output, scale, zero, minInt, maxInt);
 }
+
+/// this function computes the forbenius norm of the difference between two tensors
+fn compute_MSE_norm(comptime T: type, tensor1: *Tensor, tensor2: *Tensor) T {
+    var sum: T = 0;
+    for (tensor1, 0..) |val, i| {
+        sum = @abs((val - tensor2.data[i]) * (val - tensor2.data[i]));
+    }
+    return @sqrt(sum);
+}
+
+/// This function quantizes the input tensor, using the best scale factor and zero point
+/// computed by minimizing the MSE between the input tensor and the quantized one.
+pub fn MSE_grid_search_quant(comptime T: type, comptime U: type, scheme: quantScheme, input: *Tensor(T), output: *Tensor(U)) void {
+    // compute max and min from input tensor
+    var minFloat: T = input.data[0];
+    var maxFloat: T = input.data[0];
+
+    for (input.data[1..]) |val| {
+        minFloat = if (val < minFloat) val else minFloat;
+        maxFloat = if (val > maxFloat) val else maxFloat;
+    }
+
+    // compute maxInt and minInt
+    var maxInt: U = undefined;
+    var minInt: U = undefined;
+
+    if (minFloat < 0) {
+        minInt = -(1 << (@bitSizeOf(U) - 1)); // minInt = - 2^(b-1)
+        maxInt = 1 << (@bitSizeOf(U) - 1) - 1; // maxInt = 2^(b-1) - 1
+    } else {
+        minInt = 0; // minInt = 0
+        maxInt = 1 << @bitSizeOf(U) - 1; // maxInt = 2^b - 1
+    }
+
+    // grid search parameters setting
+    const numCandidates: usize = 100; // arbitrary choice
+    const meanFloat: T = (maxFloat + minFloat) / 2;
+    const deltaFloat = 0.2 * std.math.abs(maxFloat - meanFloat);
+    const maxStart: T = maxFloat - deltaFloat;
+    const minStart: T = minFloat + deltaFloat;
+    const step: T = (maxFloat - maxStart) / (numCandidates - 1);
+
+    // current best result variables
+    var bestMSE: T = std.math.inf(T);
+    var bestScale: T = undefined;
+    var bestZero: U = undefined;
+
+    // grid search
+    var candidateMin: T = minStart;
+    var candidateMax: T = maxStart;
+    for (0..numCandidates) |_| {
+        const candidateScale: T = get_scale_factor(T, U, candidateMin, candidateMax, minInt, maxInt);
+
+        const candidateZero: U = if (scheme == 0) 0 else get_zero_point(T, U, candidateScale, candidateMin, minInt, maxInt);
+
+        // quantize
+        quantize_tensor(T, U, input, output, candidateScale, candidateZero, minInt, maxInt);
+
+        // compute mse between original input tensor and the quantized one
+        const mseCandidate: T = compute_MSE_norm(T, input, output);
+
+        // update parameters, if mse has improved
+        if (mseCandidate < bestMSE) {
+            bestMSE = mseCandidate;
+            bestScale = candidateScale;
+            bestZero = candidateZero;
+        }
+
+        // add/sub the step
+        candidateMax += step;
+        candidateMin -= step;
+    }
+
+    // quantization based on the computed best scale factor and best zero point
+    quantize_tensor(T, U, input, output, bestScale, bestZero, minInt, maxInt);
+}
