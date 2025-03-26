@@ -1,5 +1,4 @@
-// const tensor = @import("../Tensor/TensorMath/");
-
+const std = @import("std");
 const zant = @import("../../zant.zig");
 const Tensor = zant.core.tensor.Tensor;
 
@@ -23,34 +22,59 @@ pub const quantScheme = enum {
 // - cross_entropy_quantization
 
 // ========== auxiliary functions
-pub fn clamp(comptime T: type, comptime U: type, value: T, scale: T, zero: U, minFloat: U, maxFloat: U) U {
-    if (value <= minFloat)
-        return minFloat;
-    if (value >= maxFloat)
-        return maxFloat;
+pub fn clamp(comptime T: type, comptime U: type, value: T, scale: T, zero: U, minInt: U, maxInt: U) U {
+    var roundedVal: U = @intFromFloat(@round(value / scale)); // U must be int type
+    roundedVal += zero;
 
-    const roundedVal: U = @intFromFloat(@round(value / scale + zero));
+    if (roundedVal <= minInt)
+        return minInt;
+    if (roundedVal >= maxInt)
+        return maxInt;
+
     return roundedVal;
 }
 
-// TODO
-// pub fn normalize(comptime T: type, comptime U: type, value: T, maxFloat: T, minFloat: T, top: U, bottom: U) U {
-//     return top - bottom - value - maxFloat - minFloat;
-// }
+pub inline fn get_scale_factor(comptime T: type, comptime U: type, minFloat: T, maxFloat: T, minInt: U, maxInt: U) T {
+    return (maxFloat - minFloat) / (maxInt - minInt);
+}
 
-// pub fn minmax_scale_factor(comptime T: type, comptime U: type) T {
-//     return
-// }
+pub inline fn get_zero_point(comptime T: type, comptime U: type, scale: T, minFloat: T, minInt: U, maxInt: U) U {
+    const zeroPointFloat: T = -minFloat / scale;
+    var zeroPointInt: U = @intFromFloat(@round(zeroPointFloat));
+
+    if (zeroPointInt < minInt) {
+        zeroPointInt = minInt;
+    } else if (zeroPointInt > maxInt) {
+        zeroPointInt = maxInt;
+    }
+
+    return zeroPointInt;
+}
 
 // ========== quantization
 
-// TODO: vedi x quant asimmetrica, cambia solo lo zero factor (si può "giocare" con la get_zero_factor, però server param per tipo di quant)
-pub fn minmax_sym_quant(comptime T: type, comptime U: type, scheme: quantScheme, input: *Tensor(T), output: *Tensor(U)) void {
+/// This function quantizes the input tensor, using the given parameters:
+/// scale factor, zero point, minInt/maxInt (aka the integer grid limits)
+fn quantize_tensor(comptime T: type, comptime U: type, input: *Tensor(T), output: *Tensor(U), scale: T, zero: U, minInt: U, maxInt: U) void {
+    for (input.data, 0..) |val, i| {
+        // quantize every val
+        output.data[i] = clamp(T, U, val, scale, zero, minInt, maxInt);
+    }
+}
+
+fn dequantize_tensor(comptime T: type, comptime U: type, input: *Tensor(U), output: *Tensor(T), scale: T, zero: U) void {
+    for (input.data, 0..) |val, i| {
+        // dequantize every val
+        output.data[i] = scale * (val - zero);
+    }
+}
+
+/// This function quantizes the input tensor using min/max method
+pub fn minmax_quant(comptime T: type, comptime U: type, scheme: quantScheme, input: *Tensor(T), output: *Tensor(U)) void {
     var minFloat: T = input.data[0];
     var maxFloat: T = input.data[0];
 
-    // inserire check su dimensioni/shape...
-
+    // compute the min and max value if the input tensor
     for (input.data[1..]) |val| {
         if (minFloat > val)
             minFloat = val;
@@ -58,7 +82,7 @@ pub fn minmax_sym_quant(comptime T: type, comptime U: type, scheme: quantScheme,
             maxFloat = val;
     }
 
-    // calcolo minInt e maxInt a seconda dei valori presenti
+    // compute minInt and maxInt
     var minInt: U = undefined;
     var maxInt: U = undefined;
 
@@ -70,16 +94,13 @@ pub fn minmax_sym_quant(comptime T: type, comptime U: type, scheme: quantScheme,
         maxInt = 1 << @bitSizeOf(U) - 1; // maxInt = 2^b - 1
     }
 
-    const scale: T = (maxFloat - minFloat) / (maxInt - minInt); // sostituire con get_scale_factor(T, U, );
+    const scale: T = get_scale_factor(T, U, minFloat, maxFloat, minInt, maxInt);
 
     var zero: U = undefined;
     switch (scheme) {
         0 => zero = 0,
-        1 => zero = 1, // zero factor da calcolare caso asymm
+        1 => zero = get_zero_point(T, U, scale, minFloat, minInt, maxInt),
     }
 
-    for (input.data, 0..) |val, i| {
-        // quantize ogni val
-        output.data[i] = clamp(T, U, val, scale, zero, minFloat, maxFloat);
-    }
+    quantize_tensor(T, U, input, output, scale, zero, minInt, maxInt);
 }
