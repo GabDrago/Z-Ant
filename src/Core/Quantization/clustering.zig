@@ -12,7 +12,7 @@ const pkg_allocator = zant.utils.allocator.allocator;
 // - kMeanClustering
 
 /// Initializes the centroid lookup table with random values between the minimum and maximum of the input weights.
-fn initCentroids(comptime T: anytype, numOfCentroids: usize, weights: *Tensor(T), centroids: []T) void {
+pub fn initCentroids(comptime T: anytype, numOfCentroids: usize, weights: *Tensor(T), centroids: []T) void {
 
     // Get min and max weights
     var min: T = weights.data[0];
@@ -38,7 +38,7 @@ fn initCentroids(comptime T: anytype, numOfCentroids: usize, weights: *Tensor(T)
 /// Updates the assignment of each weight to the nearest centroid.
 /// Writes the index of the chosen centroid to the weights tensor.
 /// Returns true if the centroids converged, false if not.
-fn assignCentroids(comptime F: anytype, comptime U: anytype, numOfCentroids: usize, weights: *Tensor(F), indexes: *Tensor(U), centroids: []F) bool {
+pub fn assignCentroids(comptime F: anytype, comptime U: anytype, numOfCentroids: usize, weights: *Tensor(F), indexes: *Tensor(U), centroids: []F) bool {
     var converged = true;
 
     // Iterate over each weight
@@ -66,7 +66,7 @@ fn assignCentroids(comptime F: anytype, comptime U: anytype, numOfCentroids: usi
 }
 
 /// Recalculates the centroid positions as the mean of all input weights assigned to each centroid.
-fn updateCentroidsValues(comptime F: anytype, comptime U: anytype, numOfCentroids: usize, weights: *Tensor(F), indexes: *Tensor(U), centroids: []F) void {
+pub fn updateCentroidsValues(comptime F: anytype, comptime U: anytype, numOfCentroids: usize, weights: *Tensor(F), indexes: *Tensor(U), centroids: []F) void {
 
     // Allocate accumulators and counters for each centroid
     var sums = try pkg_allocator.alloc(F, numOfCentroids);
@@ -109,6 +109,6 @@ pub fn kMeanClustering(comptime F: anytype, comptime U: anytype, input: *Tensor(
 
     // Iterate until convergence: no weight changes its centroid assignment.
     while (!assignCentroids(F, U, numOfCentroids, input, output, lookup_table)) {
-        try updateCentroidsValues(F, U, numOfCentroids, input, output, *lookup_table);
+        updateCentroidsValues(F, U, numOfCentroids, input, output, *lookup_table);
     }
 }
