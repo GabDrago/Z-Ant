@@ -7,55 +7,40 @@ pub const quantScheme = enum {
     ASYM,
 };
 
-// AUSILIARIE
-// - normalize (maxFloat, minFloat, top, bottom)
-// - get_symmetric_scale_factor
-// - get_asymmetric_scale_factor
-// - get_zero_point
-// - minimize_mse
-
-// EFFETTIVE
-// - minmax_symmetric_quantization
-// - minmax_asymmetric_quantization
-// - mse_symmetric_quantization
-// - mse_asymmetric_quantization
-// - cross_entropy_quantization
-
 // ========== auxiliary functions
 pub fn clamp(comptime T: type, comptime U: type, value: T, scale: T, zero: U, minInt: U, maxInt: U) U {
-    var roundedVal: U = @intFromFloat(@round(value / scale)); // U must be int type
-    roundedVal += zero;
+    const roundedVal: T = @round(value / scale + zero);
 
-    if (roundedVal <= minInt)
+    if (roundedVal <= @as(T, @floatFromInt(minInt)))
         return minInt;
-    if (roundedVal >= maxInt)
+    if (roundedVal >= @as(T, @floatFromInt(maxInt)))
         return maxInt;
 
-    return roundedVal;
+    const roundedValInt: U = @as(U, @intFromFloat(roundedVal));
+
+    return roundedValInt;
 }
 
-pub inline fn get_scale_factor(comptime T: type, comptime U: type, minFloat: T, maxFloat: T, minInt: U, maxInt: U) T {
-    return (maxFloat - minFloat) / (maxInt - minInt);
+pub inline fn get_scale_factor(comptime T: type, comptime U: type, minFloat: T, maxFloat: T) T {
+    const num: T = maxFloat - minFloat;
+
+    const num_elements = (1 << @bitSizeOf(U)) - 1; // 2^b - 1 values
+    const denom: T = @as(T, @floatFromInt(num_elements));
+
+    return num/denom;
 }
 
-pub inline fn get_zero_point(comptime T: type, comptime U: type, scale: T, minFloat: T, minInt: U, maxInt: U) U {
+pub inline fn get_zero_point(comptime T: type, comptime U: type, scale: T, minFloat: T) U {
     const zeroPointFloat: T = -minFloat / scale;
-    var zeroPointInt: U = @intFromFloat(@round(zeroPointFloat));
 
-    if (zeroPointInt < minInt) {
-        zeroPointInt = minInt;
-    } else if (zeroPointInt > maxInt) {
-        zeroPointInt = maxInt;
-    }
-
-    return zeroPointInt;
+    return zeroPointFloat;
 }
 
 // ========== quantization
 
 /// This function quantizes the input tensor, using the given parameters:
 /// scale factor, zero point, minInt/maxInt (aka the integer grid limits)
-fn quantize_tensor(comptime T: type, comptime U: type, input: *Tensor(T), output: *Tensor(U), scale: T, zero: U, minInt: U, maxInt: U) void {
+pub fn quantize_tensor(comptime T: type, comptime U: type, input: *Tensor(T), output: *Tensor(U), scale: T, zero: U, minInt: U, maxInt: U) void {
     for (input.data, 0..) |val, i| {
         // quantize every val
         output.data[i] = clamp(T, U, val, scale, zero, minInt, maxInt);
@@ -86,30 +71,30 @@ pub fn minmax_quant(comptime T: type, comptime U: type, scheme: quantScheme, inp
     var minInt: U = undefined;
     var maxInt: U = undefined;
 
-    if (minFloat < 0) {
-        minInt = -(1 << (@bitSizeOf(U) - 1)); // minInt = - 2^(b-1)
-        maxInt = 1 << (@bitSizeOf(U) - 1) - 1; // maxInt = 2^(b-1) - 1
+    if (@typeInfo(U).int.signedness == .signed) {
+        minInt = @as(U, -(1 << (@bitSizeOf(U) - 1))); // minInt = - 2^(b-1)
+        maxInt = @as(U, (1 << (@bitSizeOf(U) - 1)) - 1); // maxInt = 2^(b-1) - 1
     } else {
         minInt = 0; // minInt = 0
-        maxInt = 1 << @bitSizeOf(U) - 1; // maxInt = 2^b - 1
+        maxInt = @as(U, (1 << @bitSizeOf(U)) - 1); // maxInt = 2^b - 1
     }
 
-    const scale: T = get_scale_factor(T, U, minFloat, maxFloat, minInt, maxInt);
+    const scale: T = get_scale_factor(T, U, minFloat, maxFloat);
 
     var zero: U = undefined;
     switch (scheme) {
-        0 => zero = 0,
-        1 => zero = get_zero_point(T, U, scale, minFloat, minInt, maxInt),
+        quantScheme.SYMM => zero = 0,
+        quantScheme.ASYM => zero = get_zero_point(T, U, scale, minFloat),
     }
 
     quantize_tensor(T, U, input, output, scale, zero, minInt, maxInt);
 }
 
 /// this function computes the forbenius norm of the difference between two tensors
-fn compute_MSE_norm(comptime T: type, tensor1: *Tensor, tensor2: *Tensor) T {
+pub fn compute_MSE_norm(comptime T: type, comptime U: type, tensor1: *Tensor(T), tensor2: *Tensor(U)) T {
     var sum: T = 0;
-    for (tensor1, 0..) |val, i| {
-        sum = @abs((val - tensor2.data[i]) * (val - tensor2.data[i]));
+    for (tensor1.data, 0..) |val, i| {
+        sum = @abs((val - @as(T, @floatFromInt(tensor2.data[i]))) * (val - @as(T, @floatFromInt(tensor2.data[i]))));
     }
     return @sqrt(sum);
 }
@@ -155,15 +140,15 @@ pub fn MSE_grid_search_quant(comptime T: type, comptime U: type, scheme: quantSc
     var candidateMin: T = minStart;
     var candidateMax: T = maxStart;
     for (0..numCandidates) |_| {
-        const candidateScale: T = get_scale_factor(T, U, candidateMin, candidateMax, minInt, maxInt);
+        const candidateScale: T = get_scale_factor(T, U, candidateMin, candidateMax);
 
-        const candidateZero: U = if (scheme == 0) 0 else get_zero_point(T, U, candidateScale, candidateMin, minInt, maxInt);
+        const candidateZero: U = if (scheme == 0) 0 else get_zero_point(T, U, candidateScale, candidateMin);
 
         // quantize
         quantize_tensor(T, U, input, output, candidateScale, candidateZero, minInt, maxInt);
 
         // compute mse between original input tensor and the quantized one
-        const mseCandidate: T = compute_MSE_norm(T, input, output);
+        const mseCandidate: T = compute_MSE_norm(T, U, input, output);
 
         // update parameters, if mse has improved
         if (mseCandidate < bestMSE) {
